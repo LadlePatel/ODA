@@ -5,66 +5,92 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
+app.use(express.json()); // for parsing JSON bodies
 
 const pool = new Pool({
   connectionString: 'postgresql://postgres:VZWkpNPZjlRsWQojvvuZqIeeNXgngbXr@gondola.proxy.rlwy.net:42788/railway',
   ssl: { rejectUnauthorized: false }
 });
 
-// 🔁 Check & populate cities on startup
-async function initializeCitiesTable() {
+// Create 'users' table if not exists
+async function initializeUsersTable() {
   const client = await pool.connect();
   try {
-    // Create table if it doesn't exist
     await client.query(`
-      CREATE TABLE IF NOT EXISTS cities (
+      CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        balance REAL DEFAULT 1000
       );
     `);
-
-    // Check if table has any data
-    const result = await client.query('SELECT COUNT(*) FROM cities');
-    const count = parseInt(result.rows[0].count, 10);
-
-    if (count === 0) {
-      console.log("Inserting default Saudi cities...");
-      const defaultCities = [
-        'Riyadh',
-        'Jeddah',
-        'Dammam',
-        'Mecca',
-        'Medina',
-        'Abha'
-      ];
-
-      for (const city of defaultCities) {
-        await client.query('INSERT INTO cities (name) VALUES ($1) ON CONFLICT DO NOTHING', [city]);
-      }
-    } else {
-      console.log(`Cities table already has ${count} records.`);
-    }
+    console.log("✅ Users table ready");
   } catch (err) {
-    console.error("Error initializing cities table:", err);
+    console.error("❌ Error initializing users table:", err);
   } finally {
     client.release();
   }
 }
 
-// Initialize on start
-initializeCitiesTable();
+// Call on server start
+initializeUsersTable();
 
-app.get('/cities', async (req, res) => {
+// ✅ Create Account
+app.post('/create-account', async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'All fields required.' });
+  }
+
   try {
-    const result = await pool.query('SELECT DISTINCT name FROM cities LIMIT 10');
-    const cityList = result.rows.map(row => ({ label: row.name, value: row.name }));
-    res.json(cityList);
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password)
+       VALUES ($1, $2, $3)
+       RETURNING id, name, balance`,
+      [name, email, password]
+    );
+    res.json({
+      message: 'Account created successfully',
+      user: result.rows[0]
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      res.status(409).json({ message: 'Email already exists' });
+    } else {
+      console.error(err);
+      res.status(500).json({ message: 'Internal error' });
+    }
+  }
+});
+
+// ✅ Check Balance
+app.post('/check-balance', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password required.' });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT name, balance FROM users WHERE email = $1 AND password = $2`,
+      [email, password]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    const user = result.rows[0];
+    res.json({
+      message: `Welcome ${user.name}, your balance is ₹${user.balance}`
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).send('Error fetching cities');
+    res.status(500).json({ message: 'Internal error' });
   }
 });
 
 app.listen(port, () => {
-  console.log(`API running on port ${port}`);
+  console.log(`🟢 API running on port ${port}`);
 });
